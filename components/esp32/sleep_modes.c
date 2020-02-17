@@ -17,7 +17,7 @@
 #include <sys/param.h>
 #include "esp_attr.h"
 #include "esp_sleep.h"
-#include "esp_private/esp_timer_impl.h"
+#include "esp_private/esp_timer_private.h"
 #include "esp_log.h"
 #include "esp32/clk.h"
 #include "esp_newlib.h"
@@ -281,11 +281,11 @@ esp_err_t esp_light_sleep_start(void)
 {
     static portMUX_TYPE light_sleep_lock = portMUX_INITIALIZER_UNLOCKED;
     portENTER_CRITICAL(&light_sleep_lock);
-    /* We will be calling esp_timer_impl_advance inside DPORT access critical
+    /* We will be calling esp_timer_private_advance inside DPORT access critical
      * section. Make sure the code on the other CPU is not holding esp_timer
      * lock, otherwise there will be deadlock.
      */
-    esp_timer_impl_lock();
+    esp_timer_private_lock();
     s_config.rtc_ticks_at_sleep_start = rtc_time_get();
     uint64_t frc_time_at_start = esp_timer_get_time();
     DPORT_STALL_OTHER_CPU_START();
@@ -302,7 +302,7 @@ esp_err_t esp_light_sleep_start(void)
     const uint32_t flash_enable_time_us = VDD_SDIO_POWERUP_TO_FLASH_READ_US
                                           + CONFIG_ESP32_DEEP_SLEEP_WAKEUP_DELAY;
 
-#ifndef CONFIG_ESP32_SPIRAM_SUPPORT
+#ifndef CONFIG_SPIRAM
     const uint32_t vddsdio_pd_sleep_duration = MAX(FLASH_PD_MIN_SLEEP_TIME_US,
             flash_enable_time_us + LIGHT_SLEEP_TIME_OVERHEAD_US + LIGHT_SLEEP_MIN_TIME_US);
 
@@ -310,7 +310,7 @@ esp_err_t esp_light_sleep_start(void)
         pd_flags |= RTC_SLEEP_PD_VDDSDIO;
         s_config.sleep_time_adjustment += flash_enable_time_us;
     }
-#endif //CONFIG_ESP32_SPIRAM_SUPPORT
+#endif //CONFIG_SPIRAM
 
     rtc_vddsdio_config_t vddsdio_config = rtc_vddsdio_get_config();
 
@@ -347,11 +347,11 @@ esp_err_t esp_light_sleep_start(void)
      * monotonic.
      */
     if (time_diff > 0) {
-        esp_timer_impl_advance(time_diff);
+        esp_timer_private_advance(time_diff);
     }
     esp_set_time_from_rtc();
 
-    esp_timer_impl_unlock();
+    esp_timer_private_unlock();
     DPORT_STALL_OTHER_CPU_END();
     if (!wdt_was_enabled) {
         rtc_wdt_disable();
@@ -469,7 +469,7 @@ esp_err_t esp_sleep_enable_ext0_wakeup(gpio_num_t gpio_num, int level)
         ESP_LOGE(TAG, "Conflicting wake-up triggers: touch / ULP");
         return ESP_ERR_INVALID_STATE;
     }
-    s_config.ext0_rtc_gpio_num = rtc_gpio_desc[gpio_num].rtc_num;
+    s_config.ext0_rtc_gpio_num = rtc_io_number_get(gpio_num);
     s_config.ext0_trigger_level = level;
     s_config.wakeup_triggers |= RTC_EXT0_TRIG_EN;
     return ESP_OK;
@@ -483,16 +483,11 @@ static void ext0_wakeup_prepare(void)
     // Set level which will trigger wakeup
     SET_PERI_REG_BITS(RTC_CNTL_EXT_WAKEUP_CONF_REG, 0x1,
             s_config.ext0_trigger_level, RTC_CNTL_EXT_WAKEUP0_LV_S);
-    // Find GPIO descriptor in the rtc_gpio_desc table and configure the pad
-    for (size_t gpio_num = 0; gpio_num < GPIO_PIN_COUNT; ++gpio_num) {
-        const rtc_gpio_desc_t* desc = &rtc_gpio_desc[gpio_num];
-        if (desc->rtc_num == rtc_gpio_num) {
-            REG_SET_BIT(desc->reg, desc->mux);
-            SET_PERI_REG_BITS(desc->reg, 0x3, 0, desc->func);
-            REG_SET_BIT(desc->reg, desc->ie);
-            break;
-        }
-    }
+    // Find GPIO descriptor in the rtc_io_desc table and configure the pad
+    const rtc_io_desc_t* desc = &rtc_io_desc[rtc_gpio_num];
+    REG_SET_BIT(desc->reg, desc->mux);
+    SET_PERI_REG_BITS(desc->reg, 0x3, 0, desc->func);
+    REG_SET_BIT(desc->reg, desc->ie);
 }
 
 esp_err_t esp_sleep_enable_ext1_wakeup(uint64_t mask, esp_sleep_ext1_wakeup_mode_t mode)
@@ -510,7 +505,7 @@ esp_err_t esp_sleep_enable_ext1_wakeup(uint64_t mask, esp_sleep_ext1_wakeup_mode
             ESP_LOGE(TAG, "Not an RTC IO: GPIO%d", gpio);
             return ESP_ERR_INVALID_ARG;
         }
-        rtc_gpio_mask |= BIT(rtc_gpio_desc[gpio].rtc_num);
+        rtc_gpio_mask |= BIT(rtc_io_number_get(gpio));
     }
     s_config.ext1_rtc_gpio_mask = rtc_gpio_mask;
     s_config.ext1_trigger_mode = mode;
@@ -523,11 +518,11 @@ static void ext1_wakeup_prepare(void)
     // Configure all RTC IOs selected as ext1 wakeup inputs
     uint32_t rtc_gpio_mask = s_config.ext1_rtc_gpio_mask;
     for (int gpio = 0; gpio < GPIO_PIN_COUNT && rtc_gpio_mask != 0; ++gpio) {
-        int rtc_pin = rtc_gpio_desc[gpio].rtc_num;
+        int rtc_pin = rtc_io_number_get(gpio);
         if ((rtc_gpio_mask & BIT(rtc_pin)) == 0) {
             continue;
         }
-        const rtc_gpio_desc_t* desc = &rtc_gpio_desc[gpio];
+        const rtc_io_desc_t* desc = &rtc_io_desc[rtc_pin];
         // Route pad to RTC
         REG_SET_BIT(desc->reg, desc->mux);
         SET_PERI_REG_BITS(desc->reg, 0x3, 0, desc->func);
@@ -566,7 +561,7 @@ uint64_t esp_sleep_get_ext1_wakeup_status(void)
         if (!RTC_GPIO_IS_VALID_GPIO(gpio)) {
             continue;
         }
-        int rtc_pin = rtc_gpio_desc[gpio].rtc_num;
+        int rtc_pin = rtc_io_number_get(gpio);
         if ((status & BIT(rtc_pin)) == 0) {
             continue;
         }

@@ -18,7 +18,7 @@
 #include <sys/socket.h>
 #include <fcntl.h>
 #include "esp_err.h"
-
+#ifdef CONFIG_ESP_TLS_USING_MBEDTLS
 #include "mbedtls/platform.h"
 #include "mbedtls/net_sockets.h"
 #include "mbedtls/esp_debug.h"
@@ -27,6 +27,10 @@
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/error.h"
 #include "mbedtls/certs.h"
+#elif CONFIG_ESP_TLS_USING_WOLFSSL
+#include "wolfssl/wolfcrypt/settings.h"
+#include "wolfssl/ssl.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -50,7 +54,17 @@ extern "C" {
 #define ESP_ERR_MBEDTLS_PK_PARSE_KEY_FAILED               (ESP_ERR_ESP_TLS_BASE + 0x0F)  /*!< mbedtls api returned failed  */
 #define ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED              (ESP_ERR_ESP_TLS_BASE + 0x10)  /*!< mbedtls api returned failed  */
 #define ESP_ERR_MBEDTLS_SSL_CONF_PSK_FAILED               (ESP_ERR_ESP_TLS_BASE + 0x11)  /*!< mbedtls api returned failed  */
+#define ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT                (ESP_ERR_ESP_TLS_BASE + 0x12)  /*!< new connection in esp_tls_low_level_conn connection timeouted */
 
+#ifdef CONFIG_ESP_TLS_USING_MBEDTLS
+#define ESP_TLS_ERR_SSL_WANT_READ                          MBEDTLS_ERR_SSL_WANT_READ
+#define ESP_TLS_ERR_SSL_WANT_WRITE                         MBEDTLS_ERR_SSL_WANT_WRITE
+#define ESP_TLS_ERR_SSL_TIMEOUT                            MBEDTLS_ERR_SSL_TIMEOUT
+#elif CONFIG_ESP_TLS_USING_WOLFSSL /* CONFIG_ESP_TLS_USING_MBEDTLS */
+#define ESP_TLS_ERR_SSL_WANT_READ                          WOLFSSL_ERROR_WANT_READ
+#define ESP_TLS_ERR_SSL_WANT_WRITE                         WOLFSSL_ERROR_WANT_WRITE
+#define ESP_TLS_ERR_SSL_TIMEOUT                            WOLFSSL_CBIO_ERR_TIMEOUT
+#endif /*CONFIG_ESP_TLS_USING_WOLFSSL */
 typedef struct esp_tls_last_error* esp_tls_error_handle_t;
 
 /**
@@ -58,8 +72,8 @@ typedef struct esp_tls_last_error* esp_tls_error_handle_t;
 */
 typedef struct esp_tls_last_error {
     esp_err_t last_error;               /*!< error code (based on ESP_ERR_ESP_TLS_BASE) of the last occurred error */
-    int       mbedtls_error_code;       /*!< mbedtls error code from last mbedtls failed api */
-    int       mbedtls_flags;            /*!< last certification verification flags */
+    int       esp_tls_error_code;       /*!< esp_tls error code from last esp_tls failed api */
+    int       esp_tls_flags;            /*!< last certification verification flags */
 } esp_tls_last_error_t;
 
 /**
@@ -236,6 +250,7 @@ typedef struct esp_tls_cfg_server {
  * @brief      ESP-TLS Connection Handle 
  */
 typedef struct esp_tls {
+#ifdef CONFIG_ESP_TLS_USING_MBEDTLS
     mbedtls_ssl_context ssl;                                                    /*!< TLS/SSL context */
  
     mbedtls_entropy_context entropy;                                            /*!< mbedTLS entropy context structure */
@@ -263,6 +278,10 @@ typedef struct esp_tls {
 
     mbedtls_pk_context serverkey;                                               /*!< Container for the private key of the server
                                                                                    certificate */
+#endif
+#elif CONFIG_ESP_TLS_USING_WOLFSSL
+    void *priv_ctx;
+    void *priv_ssl;
 #endif
     int sockfd;                                                                 /*!< Underlying socket file descriptor. */
  
@@ -340,7 +359,7 @@ esp_tls_t *esp_tls_conn_new(const char *hostname, int hostlen, int port, const e
  * @return
  *             - -1      If connection establishment fails.
  *             -  1      If connection establishment is successful.
- *             -  0      Reserved for connection state is in progress.
+ *             -  0      If connection state is in progress.
  */
 int esp_tls_conn_new_sync(const char *hostname, int hostlen, int port, const esp_tls_cfg_t *cfg, esp_tls_t *tls);
 
@@ -460,6 +479,18 @@ void esp_tls_conn_delete(esp_tls_t *tls);
 ssize_t esp_tls_get_bytes_avail(esp_tls_t *tls);
 
 /**
+ * @brief       Returns the connection socket file descriptor from esp_tls session
+ *
+ * @param[in]   tls          handle to esp_tls context
+ *
+ * @param[out]  sockfd       int pointer to sockfd value.
+ *
+ * @return     - ESP_OK on success and value of sockfd will be updated with socket file descriptor for connection
+ *             - ESP_ERR_INVALID_ARG if (tls == NULL || sockfd == NULL)
+ */
+esp_err_t esp_tls_get_conn_sockfd(esp_tls_t *tls, int *sockfd);
+
+/**
  * @brief      Create a global CA store, initially empty.
  *
  * This function should be called if the application wants to use the same CA store for multiple connections.
@@ -492,20 +523,6 @@ esp_err_t esp_tls_init_global_ca_store(void);
 esp_err_t esp_tls_set_global_ca_store(const unsigned char *cacert_pem_buf, const unsigned int cacert_pem_bytes);
 
 /**
- * @brief      Get the pointer to the global CA store currently being used.
- *
- * The application must first call esp_tls_set_global_ca_store(). Then the same
- * CA store could be used by the application for APIs other than esp_tls.
- *
- * @note       Modifying the pointer might cause a failure in verifying the certificates.
- *
- * @return
- *             - Pointer to the global CA store currently being used    if successful.
- *             - NULL                                                   if there is no global CA store set.
- */
-mbedtls_x509_crt *esp_tls_get_global_ca_store(void);
-
-/**
  * @brief      Free the global CA store currently being used.
  *
  * The memory being used by the global CA store to store all the parsed certificates is
@@ -518,17 +535,32 @@ void esp_tls_free_global_ca_store(void);
  *             The error information is cleared internally upon return
  *
  * @param[in]  h              esp-tls error handle.
- * @param[out] mbedtls_code   last error code returned from mbedtls api (set to zero if none)
- *                            This pointer could be NULL if caller does not care about mbedtls_code
- * @param[out] mbedtls_flags  last certification verification flags (set to zero if none)
- *                            This pointer could be NULL if caller does not care about mbedtls_flags
+ * @param[out] esp_tls_code   last error code returned from mbedtls api (set to zero if none)
+ *                            This pointer could be NULL if caller does not care about esp_tls_code
+ * @param[out] esp_tls_flags  last certification verification flags (set to zero if none)
+ *                            This pointer could be NULL if caller does not care about esp_tls_code
  *
  * @return
  *            - ESP_ERR_INVALID_STATE if invalid parameters
  *            - ESP_OK (0) if no error occurred
  *            - specific error code (based on ESP_ERR_ESP_TLS_BASE) otherwise
  */
-esp_err_t esp_tls_get_and_clear_last_error(esp_tls_error_handle_t h, int *mbedtls_code, int *mbedtls_flags);
+esp_err_t esp_tls_get_and_clear_last_error(esp_tls_error_handle_t h, int *esp_tls_code, int *esp_tls_flags);
+
+#if CONFIG_ESP_TLS_USING_MBEDTLS
+/**
+ * @brief      Get the pointer to the global CA store currently being used.
+ *
+ * The application must first call esp_tls_set_global_ca_store(). Then the same
+ * CA store could be used by the application for APIs other than esp_tls.
+ *
+ * @note       Modifying the pointer might cause a failure in verifying the certificates.
+ *
+ * @return
+ *             - Pointer to the global CA store currently being used    if successful.
+ *             - NULL                                                   if there is no global CA store set.
+ */
+mbedtls_x509_crt *esp_tls_get_global_ca_store(void);
 
 #ifdef CONFIG_ESP_TLS_SERVER
 /**
@@ -557,6 +589,7 @@ int esp_tls_server_session_create(esp_tls_cfg_server_t *cfg, int sockfd, esp_tls
  */
 void esp_tls_server_session_delete(esp_tls_t *tls);
 #endif /* ! CONFIG_ESP_TLS_SERVER */
+#endif /* CONFIG_ESP_TLS_USING_MBEDTLS */
 
 #ifdef __cplusplus
 }

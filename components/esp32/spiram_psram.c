@@ -37,7 +37,7 @@
 #include "driver/periph_ctrl.h"
 #include "bootloader_common.h"
 
-#if CONFIG_ESP32_SPIRAM_SUPPORT
+#if CONFIG_SPIRAM
 #include "soc/rtc.h"
 
 //Commands for PSRAM chip
@@ -610,6 +610,12 @@ psram_size_t psram_get_size(void)
     }
 }
 
+//used in UT only
+bool psram_is_32mbit_ver0(void)
+{
+    return PSRAM_IS_32MBIT_VER0(s_psram_id);
+}
+
 /*
  * Psram mode init will overwrite original flash speed mode, so that it is possible to change psram and flash speed after OTA.
  * Flash read mode(QIO/QOUT/DIO/DOUT) will not be changed in app bin. It is decided by bootloader, OTA can not change this mode.
@@ -720,9 +726,13 @@ esp_err_t IRAM_ATTR psram_enable(psram_cache_mode_t mode, psram_vaddr_mode_t vad
         return ESP_FAIL;
     }
 
-    if (PSRAM_IS_32MBIT_VER0(s_psram_id)) {
+    if (psram_is_32mbit_ver0()) {
         s_clk_mode = PSRAM_CLK_MODE_DCLK;
         if (mode == PSRAM_CACHE_F80M_S80M) {
+#ifdef CONFIG_SPIRAM_OCCUPY_NO_HOST
+            ESP_EARLY_LOGE(TAG, "This version of PSRAM needs to claim an extra SPI peripheral at 80MHz. Please either: choose lower frequency by SPIRAM_SPEED_, or select one SPI peripheral it by SPIRAM_OCCUPY_*SPI_HOST in the menuconfig.");
+            abort();
+#else
             /*   note: If the third mode(80Mhz+80Mhz) is enabled for 32MBit 1V8 psram, one of HSPI/VSPI port will be
                  occupied by the system (according to kconfig).
                  Application code should never touch HSPI/VSPI hardware in this case.  We try to stop applications
@@ -746,6 +756,7 @@ esp_err_t IRAM_ATTR psram_enable(psram_cache_mode_t mode, psram_vaddr_mode_t vad
                     break;
                 }
             }
+#endif
         }
     } else {
         // For other psram, we don't need any extra clock cycles after cs get back to high level
@@ -847,4 +858,4 @@ static void IRAM_ATTR psram_cache_init(psram_cache_mode_t psram_cache_mode, psra
     CLEAR_PERI_REG_MASK(SPI_PIN_REG(0), SPI_CS1_DIS_M); //ENABLE SPI0 CS1 TO PSRAM(CS0--FLASH; CS1--SRAM)
 }
 
-#endif // CONFIG_ESP32_SPIRAM_SUPPORT
+#endif // CONFIG_SPIRAM

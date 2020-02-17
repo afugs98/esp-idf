@@ -11,7 +11,6 @@
  */
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
-#include "freertos/portmacro.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "driver/periph_ctrl.h"
@@ -22,7 +21,8 @@
 #include "esp_log.h"
 #include "soc/gpio_periph.h"
 #include "unity.h"
-#include "esp32/rom/ets_sys.h"
+
+#if !TEMPORARY_DISABLED_FOR_TARGETS(ESP32S2)
 
 #define PULSE_IO 18
 #define PCNT_INPUT_IO 4
@@ -650,3 +650,5 @@ TEST_CASE("PCNT counting mode test", "[pcnt][test_env=UT_T1_PCNT]")
     printf("PCNT mode test for negative count\n");
     count_mode_test(PCNT_CTRL_GND_IO);
 }
+
+#endif

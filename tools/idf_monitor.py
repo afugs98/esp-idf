@@ -355,6 +355,7 @@ class SerialReader(StoppableThread):
             self.serial.rts = True  # Force an RTS reset on open
             self.serial.open()
             self.serial.rts = False
+            self.serial.dtr = self.serial.dtr   # usbser.sys workaround
         try:
             while self.alive:
                 data = self.serial.read(self.serial.in_waiting or 1)
@@ -741,8 +742,10 @@ class Monitor(object):
             self.serial_reader.stop()
         elif cmd == CMD_RESET:
             self.serial.setRTS(True)
+            self.serial.setDTR(self.serial.dtr)  # usbser.sys workaround
             time.sleep(0.2)
             self.serial.setRTS(False)
+            self.serial.setDTR(self.serial.dtr)  # usbser.sys workaround
             self.output_enable(True)
         elif cmd == CMD_MAKE:
             self.run_make("flash")
@@ -755,9 +758,11 @@ class Monitor(object):
         elif cmd == CMD_ENTER_BOOT:
             self.serial.setDTR(False)  # IO0=HIGH
             self.serial.setRTS(True)   # EN=LOW, chip in reset
+            self.serial.setDTR(self.serial.dtr)  # usbser.sys workaround
             time.sleep(1.3)  # timeouts taken from esptool.py, includes esp32r0 workaround. defaults: 0.1
             self.serial.setDTR(True)   # IO0=LOW
             self.serial.setRTS(False)  # EN=HIGH, chip out of reset
+            self.serial.setDTR(self.serial.dtr)  # usbser.sys workaround
             time.sleep(0.45)  # timeouts taken from esptool.py, includes esp32r0 workaround. defaults: 0.05
             self.serial.setDTR(False)  # IO0=HIGH, done
         else:
@@ -789,7 +794,7 @@ def main():
         '--baud', '-b',
         help='Serial port baud rate',
         type=int,
-        default=os.environ.get('MONITOR_BAUD', 115200))
+        default=os.getenv('IDF_MONITOR_BAUD', os.getenv('MONITORBAUD', 115200)))
 
     parser.add_argument(
         '--make', '-m',
@@ -899,10 +904,13 @@ if os.name == 'nt':
                     self.output.write(data.decode())
                 else:
                     self.output.write(data)
-            except IOError:
+            except (IOError, OSError):
                 # Windows 10 bug since the Fall Creators Update, sometimes writing to console randomly throws
                 # an exception (however, the character is still written to the screen)
-                # Ref https://github.com/espressif/esp-idf/issues/1136
+                # Ref https://github.com/espressif/esp-idf/issues/1163
+                #
+                # Also possible for Windows to throw an OSError error if the data is invalid for the console
+                # (garbage bytes, etc)
                 pass
 
         def write(self, data):
@@ -939,7 +947,12 @@ if os.name == 'nt':
                     self.matched = b''
 
         def flush(self):
-            self.output.flush()
+            try:
+                self.output.flush()
+            except OSError:
+                # Account for Windows Console refusing to accept garbage bytes (serial noise, etc)
+                pass
+
 
 if __name__ == "__main__":
     main()

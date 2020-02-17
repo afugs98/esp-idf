@@ -16,6 +16,12 @@
 #include "esp_flash_partitions.h"
 #include "esp_image_format.h"
 #include "esp_app_format.h"
+// RESET_REASON is declared in rom/rtc.h
+#if CONFIG_IDF_TARGET_ESP32
+#include "esp32/rom/rtc.h"
+#elif CONFIG_IDF_TARGET_ESP32S2
+#include "esp32s2/rom/rtc.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -89,6 +95,13 @@ bool bootloader_common_erase_part_type_data(const char *list_erase, bool ota_dat
 bool bootloader_common_label_search(const char *list, char *label);
 
 /**
+ * @brief Configure default SPI pin modes and drive strengths
+ *
+ * @param drv GPIO drive level (determined by clock frequency)
+ */
+void bootloader_configure_spi_pins(int drv);
+
+/**
  * @brief Calculates a sha-256 for a given partition or returns a appended digest.
  *
  * This function can be used to return the SHA-256 digest of application, bootloader and data partitions.
@@ -153,6 +166,14 @@ esp_err_t bootloader_common_get_partition_description(const esp_partition_pos_t 
  * @return Chip revision number
  */
 uint8_t bootloader_common_get_chip_revision(void);
+
+/**
+ * @brief Query reset reason
+ *
+ * @param cpu_no CPU number
+ * @return reset reason enumeration
+ */
+RESET_REASON bootloader_common_get_reset_reason(int cpu_no);
 
 /**
  * @brief Check if the image (bootloader and application) has valid chip ID and revision
